@@ -70,7 +70,6 @@ static char try_cast_and_pack_record(msgpack_packer *packer, msgpack_object *key
         repack_record_key(packer, key);
         cast_from[obj_type].to_int(packer, val);
     } else if(target_type == TC_FILTER_FLOAT && cast_from[obj_type].to_float) {
-        printf("here: %d\n", obj_type);
         repack_record_key(packer, key);
         cast_from[obj_type].to_float(packer, val);
     } else {
@@ -206,7 +205,6 @@ static int configure(struct typecast_ctx *ctx,
             mk_list_add(&primitive_cast_record->_head, &ctx->primitive_casts);
             flb_utils_split_free(split);
         }
-        printf("%s -> %s\n", prop->key, prop->val);
     }
 
     return 0;
@@ -227,7 +225,6 @@ static int cb_typecast_init(struct flb_filter_instance *f_ins,
                                 struct flb_config *config,
                                 void *data)
 {
-    printf("   IN INIT   \n");
     struct typecast_ctx *ctx = NULL;
 
     ctx = flb_malloc(sizeof(*ctx));
@@ -249,7 +246,6 @@ static int cb_typecast_init(struct flb_filter_instance *f_ins,
 
 static int cb_typecast_exit(void *data, struct flb_config *config)
 {
-    printf("   IN EXIT \n");
     struct typecast_ctx *ctx = data;
 
     if (ctx != NULL) {
