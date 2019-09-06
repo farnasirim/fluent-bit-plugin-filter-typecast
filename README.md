@@ -14,19 +14,19 @@ $ make
 Reference the create shared object as a plugin in your plugins file
 (e.g. `plugins.conf`):
 
-```toml
+```
 [PLUGINS]
     Path /path/to/.so
 ```
 
 And refer to the above file under service configurations:
-```toml
+```
 [SERVICE]
     Plugins_File /path/to/plugins.conf
 ```
 
 Use the typecast filter in your configurations and run fluent-bit:
-```toml
+```
 [INPUT]
     Name cpu
     tag tag_cpu
