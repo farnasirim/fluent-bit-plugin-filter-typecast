@@ -38,8 +38,8 @@ Use the typecast filter in your configurations and run fluent-bit:
 [FILTER]
     Name typecast
     Match tag_cpu
-    # If Mem.total field exists in the record and has type int, cast it to string
-    primitive_cast Mem.total int string
+    # If Mem.total field exists in the record, try to cast it to string
+    primitive_cast Mem.total string
 
 
 [OUTPUT]
