@@ -8,11 +8,20 @@
 #include <fluent-bit/flb_time.h>
 
 #include <msgpack.h>
+
 #include "typecast.h"
+#include "cast_ops.h"
 
 #define PLUGIN_NAME "filter_typecast"
 
-void primitive_cast_record_free(struct primitive_cast_record *rec)
+static char *TYPE_NAMES[] = {
+    [TC_FILTER_INT ... TC_FILTER_INT] = "int",
+    [TC_FILTER_STRING ... TC_FILTER_STRING] = "string",
+    [TC_FILTER_FLOAT ... TC_FILTER_FLOAT] = "float",
+};
+static const int TYPES_COUNT = sizeof(TYPE_NAMES)/sizeof(*TYPE_NAMES);
+
+static void primitive_cast_record_free(struct primitive_cast_record *rec)
 {
     if(rec->key != NULL) {
         flb_free(rec->key);
@@ -31,12 +40,7 @@ static primitive_type_t type_index(const char *maybe_type_name)
     return -1;
 }
 
-static int is_msgpack_object_castable(msgpack_object *obj, int target_type)
-{
-    return true;
-}
-
-int type_from_msgpack_type(int msgpack_object_type)
+primitive_type_t type_from_msgpack_type(int msgpack_object_type)
 {
     if(msgpack_object_type == MSGPACK_OBJECT_STR) {
         return type_index("string");
@@ -51,6 +55,33 @@ int type_from_msgpack_type(int msgpack_object_type)
     return -1;
 }
 
+static void repack_record_key(msgpack_packer *packer, msgpack_object *key) {
+    msgpack_pack_str(packer, key->via.str.size);
+    msgpack_pack_str_body(packer, key->via.str.ptr, key->via.str.size);
+}
+
+static char try_cast_and_pack_record(msgpack_packer *packer, msgpack_object *key,
+        msgpack_object *val, primitive_type_t target_type)
+{
+    primitive_type_t obj_type = type_from_msgpack_type(val->type);
+
+    if(target_type == TC_FILTER_STRING && cast_from[obj_type].to_string) {
+        repack_record_key(packer, key);
+        cast_from[obj_type].to_string(packer, val);
+    } else if(target_type == TC_FILTER_INT && cast_from[obj_type].to_int) {
+        repack_record_key(packer, key);
+        cast_from[obj_type].to_int(packer, val);
+    } else if(target_type == TC_FILTER_FLOAT && cast_from[obj_type].to_float) {
+        printf("here: %d\n", obj_type);
+        repack_record_key(packer, key);
+        cast_from[obj_type].to_float(packer, val);
+    } else {
+        return FLB_FALSE;
+    }
+
+    return FLB_TRUE;
+}
+
 int msgpack_type_matches_type(int msgpack_type, primitive_type_t tp)
 {
     return type_from_msgpack_type(msgpack_type) == tp || tp == type_index("*");
@@ -63,14 +94,14 @@ static int cb_typecast_filter(const void *data, size_t bytes,
                               void *context,
                               struct flb_config *config)
 {
-    int i;
+    int i, j;
     struct flb_time tm;
     struct mk_list *head;
     struct mk_list *tmp;
     struct typecast_ctx *ctx = context;
     struct primitive_cast_record *rec;
     size_t off = 0;
-    char any_modified = FLB_FALSE;
+    char current_modified, any_modified = FLB_FALSE;
     int map_num;
     msgpack_sbuffer tmp_sbuf;
     msgpack_packer tmp_pck;
@@ -82,12 +113,9 @@ static int cb_typecast_filter(const void *data, size_t bytes,
     msgpack_sbuffer_init(&tmp_sbuf);
     msgpack_packer_init(&tmp_pck, &tmp_sbuf, msgpack_sbuffer_write);
 
-
     msgpack_unpacked_init(&result);
     while (msgpack_unpack_next(&result, data, bytes, &off) == MSGPACK_UNPACK_SUCCESS) {
         
-        
-
         if (result.data.type != MSGPACK_OBJECT_ARRAY) {
             continue;
         }
@@ -96,54 +124,33 @@ static int cb_typecast_filter(const void *data, size_t bytes,
 
         map_num = obj->via.map.size;
 
+        msgpack_pack_array(&tmp_pck, 2);
+        flb_time_append_to_msgpack(&tm, &tmp_pck, 0);
+        msgpack_pack_map(&tmp_pck, map_num);
+
         kv = obj->via.map.ptr;
         for (i = 0; i < map_num; i++) {
             field_key = &(kv + i)->key;
+            current_modified = FLB_FALSE;
             mk_list_foreach(head, &ctx->primitive_casts) {
                 rec = mk_list_entry(head, struct primitive_cast_record, _head);
                 if (field_key->type == MSGPACK_OBJECT_STR &&
                         strlen(rec->key) == field_key->via.str.size &&
                         !strncasecmp(rec->key, field_key->via.str.ptr, field_key->via.str.size)) {
                     field_value = &(kv + i)->val;
-                    if(msgpack_type_matches_type(field_value->type, rec->from) &&
-                            is_msgpack_object_castable(field_value, rec->to)) {
-                        printf("casting key: %s from type %s to type %s\n", field_key->via.str.ptr, TYPE_NAMES[rec->from], TYPE_NAMES[rec->to]);
+                    if (try_cast_and_pack_record(&tmp_pck, field_key, field_value, rec->to) == FLB_TRUE) {
+                        current_modified = any_modified = FLB_TRUE;
+                        break;
                     }
                 }
             }
+            if(!current_modified) {
+                msgpack_pack_object(&tmp_pck, (kv+i)->key);
+                msgpack_pack_object(&tmp_pck, (kv+i)->val);
+            }
         }
-
-        /*
-            for k, v in obj:
-                for cast in primitive casts:
-                    if cast.k == k and cast.type == v.type:
-                        if v.type castable to cast.target:
-                            rewrite record with the new casted value
-
-        */
-        msgpack_pack_array(&tmp_pck, 2);
-        flb_time_append_to_msgpack(&tm, &tmp_pck, 0);
-
-        msgpack_pack_map(&tmp_pck, 1);
-
-        // mk_list_foreach_safe(head, tmp, &ctx->records) {
-        //     mod_rec = mk_list_entry(head, struct modifier_record,  _head);
-        //     msgpack_pack_str(&tmp_pck, mod_rec->key_len);
-        //     msgpack_pack_str_body(&tmp_pck,
-        //                           mod_rec->key, mod_rec->key_len);
-        //     msgpack_pack_str(&tmp_pck, mod_rec->val_len);
-        //     msgpack_pack_str_body(&tmp_pck,
-        //                           mod_rec->val, mod_rec->val_len);
-        // }
-        msgpack_pack_str(&tmp_pck, 5);
-        msgpack_pack_str_body(&tmp_pck,
-                              "a key", 5);
-        msgpack_pack_str(&tmp_pck, 7);
-        msgpack_pack_str_body(&tmp_pck,
-                              "a value", 7);
-        any_modified = FLB_TRUE;
-
     }
+
     msgpack_unpacked_destroy(&result);
 
     if (any_modified == FLB_FALSE) {
@@ -169,15 +176,15 @@ static int configure(struct typecast_ctx *ctx,
 
     mk_list_foreach(head, &f_ins->properties) {
         prop = mk_list_entry(head, struct flb_config_prop, _head);
-        if(!strcasecmp(PRIMITIVE_CAST, prop->key)) {
+        if(!strcasecmp(TC_PRIMITIVE_CAST, prop->key)) {
             primitive_cast_record = flb_malloc(sizeof *primitive_cast_record);
             if(!primitive_cast_record) {
                 flb_errno();
                 continue;
             }
 
-            split = flb_utils_split(prop->val, ' ', 2);
-            if (mk_list_size(split) != 3) {
+            split = flb_utils_split(prop->val, ' ', 1);
+            if (mk_list_size(split) != 2) {
                 flb_error("[%s] invalid primitive_cast parameters, expects "
                           "'KEY ORIGINAL_TYPE TARGET_TYPE'", PLUGIN_NAME);
                 primitive_cast_record_free(primitive_cast_record);
@@ -189,19 +196,8 @@ static int configure(struct typecast_ctx *ctx,
             primitive_cast_record->key = flb_strndup(arg->value, arg->len);
             primitive_cast_record->key_len = arg->len;
 
-            arg = mk_list_entry_next(split->next, struct flb_split_entry, _head,
-                                     split);
-            if((primitive_cast_record->from = type_index(arg->value)) < 0) {
-                flb_error("[%s] invalid value '%s' for parameter 'ORIGINAL_TYPE'",
-                          PLUGIN_NAME, arg->value);
-                primitive_cast_record_free(primitive_cast_record);
-                flb_utils_split_free(split);
-                continue;
-            }
-
-            arg = mk_list_entry_next(split->next->next, struct flb_split_entry,
-                                     _head, split);
-            if((primitive_cast_record->to = type_index(arg->value)) <= 0) {
+            arg = mk_list_entry_last(split, struct flb_split_entry, _head);
+            if((primitive_cast_record->to = type_index(arg->value)) < 0) {
                 flb_error("[%s] invalid value '%s' for parameter 'TARGET_TYPE'",
                           PLUGIN_NAME, arg->value);
                 primitive_cast_record_free(primitive_cast_record);
